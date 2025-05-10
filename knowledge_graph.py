@@ -23,6 +23,19 @@ class KnowledgeGraphBuilder:
             'LAW': 'lightseagreen',
             'LANGUAGE': 'lightsteelblue'
         }
+        # Neo4j标签映射
+        self.neo4j_labels = {
+            'PERSON': 'Person',
+            'ORG': 'Organization',
+            'GPE': 'Location',
+            'DATE': 'Date',
+            'PRODUCT': 'Product',
+            'EVENT': 'Event',
+            'WORK_OF_ART': 'WorkOfArt',
+            'LAW': 'Law',
+            'LANGUAGE': 'Language',
+            'NOUN_PHRASE': 'Entity'
+        }
         
     def extract_entities(self, text: str) -> List[Tuple[str, str]]:
         """
@@ -190,6 +203,56 @@ class KnowledgeGraphBuilder:
             'relation_types': len(set(data.get('relation') for _, _, data in self.graph.edges(data=True)))
         }
 
+    def generate_neo4j_queries(self, output_file: str = "neo4j_queries.cypher") -> str:
+        """
+        生成Neo4j Cypher查询语句
+        """
+        queries = []
+        
+        # 1. 创建约束
+        constraints = [
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Person) REQUIRE n.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Organization) REQUIRE n.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Location) REQUIRE n.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Date) REQUIRE n.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Product) REQUIRE n.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Event) REQUIRE n.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:WorkOfArt) REQUIRE n.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Law) REQUIRE n.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Language) REQUIRE n.name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Entity) REQUIRE n.name IS UNIQUE"
+        ]
+        queries.extend(constraints)
+        
+        # 2. 创建节点
+        for node, attrs in self.graph.nodes(data=True):
+            entity_type = attrs.get('type', 'NOUN_PHRASE')
+            neo4j_label = self.neo4j_labels.get(entity_type, 'Entity')
+            # 转义单引号
+            node_name = node.replace("'", "\\'")
+            query = f"MERGE (n:{neo4j_label} {{name: '{node_name}'}})"
+            queries.append(query)
+        
+        # 3. 创建关系
+        for u, v, data in self.graph.edges(data=True):
+            relation = data.get('relation', 'RELATED_TO')
+            # 转义单引号
+            u_name = u.replace("'", "\\'")
+            v_name = v.replace("'", "\\'")
+            relation = relation.replace("'", "\\'")
+            query = f"""
+            MATCH (a), (b)
+            WHERE a.name = '{u_name}' AND b.name = '{v_name}'
+            MERGE (a)-[r:{relation.upper()}]->(b)
+            """
+            queries.append(query)
+        
+        # 写入文件
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(queries))
+        
+        return '\n'.join(queries)
+
 def main():
     # 示例文本
     sample_text = """
@@ -216,10 +279,15 @@ def main():
     # 导出到CSV
     kg_builder.export_to_csv()
     
+    # 生成Neo4j查询
+    neo4j_queries = kg_builder.generate_neo4j_queries()
+    print("\nNeo4j查询已生成！请查看 neo4j_queries.cypher 文件")
+    
     print("\n知识图谱已生成！请查看以下文件：")
     print("- knowledge_graph.png（可视化图谱）")
     print("- nodes_knowledge_graph.csv（节点数据）")
     print("- edges_knowledge_graph.csv（关系数据）")
+    print("- neo4j_queries.cypher（Neo4j查询语句）")
 
 if __name__ == "__main__":
     main() 
