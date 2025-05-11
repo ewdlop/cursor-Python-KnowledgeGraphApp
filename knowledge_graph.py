@@ -4,11 +4,109 @@ import matplotlib.pyplot as plt
 from typing import List, Tuple, Dict, Set
 import pandas as pd
 from collections import defaultdict
+import PyPDF2
+from docx import Document
+from pathlib import Path
+from tqdm import tqdm
+import argparse
+import re
+
+class DocumentProcessor:
+    @staticmethod
+    def extract_text_from_pdf(pdf_path: str) -> str:
+        """
+        从PDF文件中提取文本
+        """
+        text = ""
+        try:
+            with open(pdf_path, 'rb') as file:
+                # 创建PDF阅读器对象
+                pdf_reader = PyPDF2.PdfReader(file)
+                
+                # 获取页数
+                num_pages = len(pdf_reader.pages)
+                
+                # 遍历每一页
+                for page_num in tqdm(range(num_pages), desc="处理PDF页面"):
+                    # 获取页面对象
+                    page = pdf_reader.pages[page_num]
+                    # 提取文本
+                    text += page.extract_text() + "\n"
+                
+                return text
+        except Exception as e:
+            print(f"处理PDF文件时出错: {str(e)}")
+            return ""
+
+    @staticmethod
+    def extract_text_from_docx(docx_path: str) -> str:
+        """
+        从Word文档中提取文本
+        """
+        try:
+            doc = Document(docx_path)
+            return "\n".join([paragraph.text for paragraph in doc.paragraphs])
+        except Exception as e:
+            print(f"处理Word文档时出错: {str(e)}")
+            return ""
+
+    @staticmethod
+    def split_text(text: str, max_length: int = 1000000) -> List[str]:
+        """
+        将长文本分割成较小的块
+        """
+        # 如果文本长度在限制范围内，直接返回
+        if len(text) <= max_length:
+            return [text]
+        
+        # 按句子分割文本
+        sentences = re.split(r'[.!?。！？]+', text)
+        chunks = []
+        current_chunk = ""
+        
+        for sentence in sentences:
+            # 如果单个句子超过最大长度，需要进一步分割
+            if len(sentence) > max_length:
+                # 按段落分割
+                paragraphs = sentence.split('\n')
+                for paragraph in paragraphs:
+                    if len(paragraph) > max_length:
+                        # 按逗号分割
+                        parts = paragraph.split('，')
+                        for part in parts:
+                            if len(current_chunk) + len(part) <= max_length:
+                                current_chunk += part + "，"
+                            else:
+                                if current_chunk:
+                                    chunks.append(current_chunk.strip())
+                                current_chunk = part + "，"
+                    else:
+                        if len(current_chunk) + len(paragraph) <= max_length:
+                            current_chunk += paragraph + "\n"
+                        else:
+                            if current_chunk:
+                                chunks.append(current_chunk.strip())
+                            current_chunk = paragraph + "\n"
+            else:
+                if len(current_chunk) + len(sentence) <= max_length:
+                    current_chunk += sentence + "。"
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    current_chunk = sentence + "。"
+        
+        # 添加最后一个块
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+        
+        return chunks
 
 class KnowledgeGraphBuilder:
     def __init__(self):
         # 加载spaCy模型
         self.nlp = spacy.load("en_core_web_sm")
+        # 设置最大文本长度
+        self.nlp.max_length = 1000000
         # 创建有向图对象
         self.graph = nx.DiGraph()
         # 实体类型颜色映射
@@ -112,26 +210,33 @@ class KnowledgeGraphBuilder:
         """
         构建知识图谱，包含更多实体和关系类型
         """
-        # 提取实体和关系
-        entities = self.extract_entities(text)
-        relations = self.extract_relations(text)
+        # 分割长文本
+        text_chunks = DocumentProcessor.split_text(text)
+        print(f"文本已分割为 {len(text_chunks)} 个块进行处理")
         
-        # 添加实体节点
-        for entity, label in entities:
-            self.graph.add_node(entity, type=label)
-        
-        # 添加关系边
-        for subject, relation, object_ in relations:
-            # 检查实体是否在图中
-            if subject in self.graph and object_ in self.graph:
-                self.graph.add_edge(subject, object_, relation=relation)
-            # 如果实体不在图中，尝试添加它们
-            elif subject not in self.graph:
-                self.graph.add_node(subject, type="NOUN_PHRASE")
-                self.graph.add_edge(subject, object_, relation=relation)
-            elif object_ not in self.graph:
-                self.graph.add_node(object_, type="NOUN_PHRASE")
-                self.graph.add_edge(subject, object_, relation=relation)
+        # 处理每个文本块
+        for i, chunk in enumerate(text_chunks, 1):
+            print(f"正在处理第 {i}/{len(text_chunks)} 个文本块...")
+            # 提取实体和关系
+            entities = self.extract_entities(chunk)
+            relations = self.extract_relations(chunk)
+            
+            # 添加实体节点
+            for entity, label in entities:
+                self.graph.add_node(entity, type=label)
+            
+            # 添加关系边
+            for subject, relation, object_ in relations:
+                # 检查实体是否在图中
+                if subject in self.graph and object_ in self.graph:
+                    self.graph.add_edge(subject, object_, relation=relation)
+                # 如果实体不在图中，尝试添加它们
+                elif subject not in self.graph:
+                    self.graph.add_node(subject, type="NOUN_PHRASE")
+                    self.graph.add_edge(subject, object_, relation=relation)
+                elif object_ not in self.graph:
+                    self.graph.add_node(object_, type="NOUN_PHRASE")
+                    self.graph.add_edge(subject, object_, relation=relation)
     
     def visualize(self, output_file: str = "knowledge_graph.png"):
         """
@@ -153,17 +258,27 @@ class KnowledgeGraphBuilder:
         nx.draw_networkx_edges(self.graph, pos, edge_color='gray',
                              arrows=True, arrowsize=20, width=2)
         
-        # 添加节点标签
-        nx.draw_networkx_labels(self.graph, pos, font_size=8)
+        # 添加节点标签，处理特殊字符
+        labels = {node: node.replace('$', '\\$').replace('_', '\\_') 
+                 for node in self.graph.nodes()}
+        nx.draw_networkx_labels(self.graph, pos, labels=labels, font_size=8)
         
-        # 添加边的标签
-        edge_labels = nx.get_edge_attributes(self.graph, 'relation')
+        # 添加边的标签，处理特殊字符
+        edge_labels = {}
+        for u, v, data in self.graph.edges(data=True):
+            relation = data.get('relation', '')
+            if relation:
+                edge_labels[(u, v)] = relation.replace('$', '\\$').replace('_', '\\_')
+        
         nx.draw_networkx_edge_labels(self.graph, pos, edge_labels=edge_labels,
                                    font_size=6)
         
         plt.legend(scatterpoints=1, frameon=False, labelspacing=1)
         plt.axis('off')
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        
+        # 保存图片时使用更高的DPI和更宽松的边界
+        plt.savefig(output_file, dpi=300, bbox_inches='tight', 
+                   pad_inches=0.5, format='png')
         plt.close()
     
     def export_to_csv(self, output_file: str = "knowledge_graph.csv"):
@@ -192,17 +307,6 @@ class KnowledgeGraphBuilder:
         # 保存边数据
         pd.DataFrame(edges_data).to_csv(f"edges_{output_file}", index=False)
     
-    def get_statistics(self) -> Dict:
-        """
-        获取知识图谱的统计信息
-        """
-        return {
-            'num_nodes': self.graph.number_of_nodes(),
-            'num_edges': self.graph.number_of_edges(),
-            'entity_types': len(set(attrs.get('type') for _, attrs in self.graph.nodes(data=True))),
-            'relation_types': len(set(data.get('relation') for _, _, data in self.graph.edges(data=True)))
-        }
-
     def generate_neo4j_queries(self, output_file: str = "neo4j_queries.cypher") -> str:
         """
         生成Neo4j Cypher查询语句
@@ -252,18 +356,47 @@ class KnowledgeGraphBuilder:
             f.write('\n'.join(queries))
         
         return '\n'.join(queries)
+    
+    def get_statistics(self) -> Dict:
+        """
+        获取知识图谱的统计信息
+        """
+        return {
+            'num_nodes': self.graph.number_of_nodes(),
+            'num_edges': self.graph.number_of_edges(),
+            'entity_types': len(set(attrs.get('type') for _, attrs in self.graph.nodes(data=True))),
+            'relation_types': len(set(data.get('relation') for _, _, data in self.graph.edges(data=True)))
+        }
 
-def main():
-    # 示例文本
-    sample_text = """
-    Ross Eustace Geller[2] (born c. 1968)[3] portrayed by David Schwimmer, is one of the six main characters of the NBC sitcom Friends. Ross is considered by many to be the most intelligent member of the group and is noted for his goofy but lovable demeanor.[4] His relationship with Rachel Green was included in TV Guide's list of the best TV couples of all time, as well as Entertainment Weekly's "30 Best 'Will They/Won't They?' TV Couples".[5] Kevin Bright, who was one of the executive producers of the show, had worked with Schwimmer before, so the writers were already developing Ross's character in Schwimmer's voice. Hence, Schwimmer was the first person to be cast on the show.[6]
+def process_document(file_path: str, output_prefix: str = None) -> None:
     """
+    处理文档并生成知识图谱
+    """
+    # 获取文件扩展名
+    file_ext = Path(file_path).suffix.lower()
+    
+    # 提取文本
+    print("正在提取文本...")
+    if file_ext == '.pdf':
+        text = DocumentProcessor.extract_text_from_pdf(file_path)
+    elif file_ext in ['.docx', '.doc']:
+        text = DocumentProcessor.extract_text_from_docx(file_path)
+    else:
+        print(f"不支持的文件类型: {file_ext}")
+        return
+    
+    if not text:
+        print("未能从文档中提取到文本")
+        return
+    
+    # 设置输出文件名前缀
+    if output_prefix is None:
+        output_prefix = Path(file_path).stem
     
     # 创建知识图谱构建器
+    print("正在构建知识图谱...")
     kg_builder = KnowledgeGraphBuilder()
-    
-    # 构建知识图谱
-    kg_builder.build_graph(sample_text)
+    kg_builder.build_graph(text)
     
     # 获取统计信息
     stats = kg_builder.get_statistics()
@@ -274,20 +407,34 @@ def main():
     print(f"关系类型数量: {stats['relation_types']}")
     
     # 可视化
-    kg_builder.visualize()
+    print("\n正在生成可视化...")
+    kg_builder.visualize(f"{output_prefix}_graph.png")
     
     # 导出到CSV
-    kg_builder.export_to_csv()
+    print("正在导出数据...")
+    kg_builder.export_to_csv(f"{output_prefix}_graph.csv")
     
     # 生成Neo4j查询
-    neo4j_queries = kg_builder.generate_neo4j_queries()
-    print("\nNeo4j查询已生成！请查看 neo4j_queries.cypher 文件")
+    print("正在生成Neo4j查询...")
+    kg_builder.generate_neo4j_queries(f"{output_prefix}_queries.cypher")
     
-    print("\n知识图谱已生成！请查看以下文件：")
-    print("- knowledge_graph.png（可视化图谱）")
-    print("- nodes_knowledge_graph.csv（节点数据）")
-    print("- edges_knowledge_graph.csv（关系数据）")
-    print("- neo4j_queries.cypher（Neo4j查询语句）")
+    print(f"\n处理完成！输出文件：")
+    print(f"- {output_prefix}_graph.png（可视化图谱）")
+    print(f"- nodes_{output_prefix}_graph.csv（节点数据）")
+    print(f"- edges_{output_prefix}_graph.csv（关系数据）")
+    print(f"- {output_prefix}_queries.cypher（Neo4j查询语句）")
+
+def main():
+    # 创建命令行参数解析器
+    parser = argparse.ArgumentParser(description='从文档构建知识图谱')
+    parser.add_argument('file_path', help='输入文件路径（支持PDF和Word文档）')
+    parser.add_argument('--output', '-o', help='输出文件前缀（可选）')
+    
+    # 解析命令行参数
+    args = parser.parse_args()
+    
+    # 处理文档
+    process_document(args.file_path, args.output)
 
 if __name__ == "__main__":
     main() 
